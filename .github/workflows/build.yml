@@ -1,0 +1,35 @@
+name: Build and Publish Firmware
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python & PlatformIO
+        uses: platformio/action@v4
+
+      - name: Build firmware
+        run: pio run -e nodemcuv2
+
+      - name: Create release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload firmware asset
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./.pio/build/nodemcuv2/firmware.bin
+          asset_name: firmware.bin
+          asset_content_type: application/octet-stream
