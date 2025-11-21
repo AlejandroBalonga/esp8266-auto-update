@@ -1,12 +1,12 @@
 #pragma once
 
 // WiFi
-#define WIFI_SSID "TU_SSID"
-#define WIFI_PASS "TU_PASSWORD"
+#define WIFI_SSID "Argul-iot"
+#define WIFI_PASS ""
 
 // URLs: sustituye USER y REPO por los tuyos
-#define UPDATE_VERSION_URL "https://raw.githubusercontent.com/USER/REPO/main/version.txt"
-#define UPDATE_BIN_URL "https://github.com/USER/REPO/releases/latest/download/firmware.bin"
+#define UPDATE_VERSION_URL "https://raw.githubusercontent.com/AlejandroBalonga/esp8266-auto-update/main/version.txt"
+#define UPDATE_BIN_URL "https://github.com/AlejandroBalonga/esp8266-auto-update/releases/latest/download/firmware.bin"
 
 // Versión actual del firmware (actualiza cuando corresponda localmente)
 #define CURRENT_VERSION "1.0.0"

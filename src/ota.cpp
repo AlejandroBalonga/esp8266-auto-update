@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <WiFi.h>
+#include <ESP8266WiFi.h>
 #include <ArduinoOTA.h>
 #include "ota.h"
 #include <ESP8266HTTPClient.h>
@@ -55,10 +55,11 @@ void OTAUpdater::begin()
 
 void OTAUpdater::checkForUpdate()
 {
+    WiFiClient client;
     HTTPClient http;
     String version;
     Serial.println("Comprobando versión remota...");
-    if (http.begin(UPDATE_VERSION_URL))
+    if (http.begin(client, UPDATE_VERSION_URL))
     {
         int code = http.GET();
         if (code == HTTP_CODE_OK)
@@ -71,7 +72,7 @@ void OTAUpdater::checkForUpdate()
                 Serial.println("Nueva versión disponible, descargando firmware...");
                 // HTTP update (no TLS aquí; si usas https y certificación estricta,
                 // configura WiFiClientSecure y fingerprint o CA)
-                t_httpUpdate_return ret = ESPhttpUpdate.update(UPDATE_BIN_URL);
+                t_httpUpdate_return ret = ESPhttpUpdate.update(http, UPDATE_BIN_URL);
                 if (ret == HTTP_UPDATE_OK)
                 {
                     Serial.println("Actualización OK, reiniciando...");
