@@ -55,50 +55,79 @@ void OTAUpdater::begin()
 
 void OTAUpdater::checkForUpdate()
 {
-    WiFiClient client;
-    HTTPClient http;
-    String version;
-    Serial.println("Comprobando versión remota...");
-    if (http.begin(client, UPDATE_VERSION_URL))
+    Serial.println("Iniciando check de versión...");
+
+    if (WiFi.status() != WL_CONNECTED)
     {
-        int code = http.GET();
-        if (code == HTTP_CODE_OK)
+        Serial.println("WiFi no conectado, abortando check.");
+        return;
+    }
+
+    Serial.print("IP local: ");
+    Serial.println(WiFi.localIP());
+
+    // DNS check (opcional, ayuda a diagnosticar)
+    IPAddress ip;
+    Serial.println("Resolviendo raw.githubusercontent.com...");
+    if (WiFi.hostByName("raw.githubusercontent.com", ip))
+    {
+        Serial.print("raw.githubusercontent.com -> ");
+        Serial.println(ip);
+    }
+    else
+    {
+        Serial.println("Fallo en resolución DNS para raw.githubusercontent.com");
+        // No continue: puede ser problema de DNS/Network
+    }
+    
+    BearSSL::WiFiClientSecure client;
+    client.setInsecure(); // solo para pruebas. En producción validar CA/fingerprint.
+    HTTPClient http;
+
+    Serial.print("Conectando a: ");
+    Serial.println(UPDATE_VERSION_URL);
+
+    if (!http.begin(client, UPDATE_VERSION_URL))
+    {
+        Serial.println("http.begin() falló (no pudo iniciar conexión HTTPS)");
+        return;
+    }
+
+    int code = http.GET();
+    Serial.printf("http.GET() -> %d\n", code);
+
+    if (code == HTTP_CODE_OK)
+    {
+        String version = http.getString();
+        version.trim();
+        Serial.printf("Versión remota: %s\n", version.c_str());
+        if (version != CURRENT_VERSION)
         {
-            version = http.getString();
-            version.trim();
-            Serial.printf("Versión remota: %s\n", version.c_str());
-            if (version != CURRENT_VERSION)
+            Serial.println("Nueva versión disponible, procediendo a OTA...");
+            t_httpUpdate_return ret = ESPhttpUpdate.update(client, UPDATE_BIN_URL);
+            if (ret == HTTP_UPDATE_OK)
             {
-                Serial.println("Nueva versión disponible, descargando firmware...");
-                // HTTP update (no TLS aquí; si usas https y certificación estricta,
-                // configura WiFiClientSecure y fingerprint o CA)
-                t_httpUpdate_return ret = ESPhttpUpdate.update(http, UPDATE_BIN_URL);
-                if (ret == HTTP_UPDATE_OK)
-                {
-                    Serial.println("Actualización OK, reiniciando...");
-                }
-                else if (ret == HTTP_UPDATE_FAILED)
-                {
-                    Serial.printf("Update failed: %s\n", ESPhttpUpdate.getLastErrorString().c_str());
-                }
-                else if (ret == HTTP_UPDATE_NO_UPDATES)
-                {
-                    Serial.println("No updates available (unexpected).");
-                }
+                Serial.println("Actualización OK.");
             }
-            else
+            else if (ret == HTTP_UPDATE_FAILED)
             {
-                Serial.println("Firmware actualizado.");
+                Serial.printf("Update failed: %s\n", ESPhttpUpdate.getLastErrorString().c_str());
+            }
+            else if (ret == HTTP_UPDATE_NO_UPDATES)
+            {
+                Serial.println("No updates available.");
             }
         }
         else
         {
-            Serial.printf("Error al obtener version.txt: %d\n", code);
+            Serial.println("Firmware ya actualizado.");
         }
-        http.end();
     }
     else
     {
-        Serial.println("No se pudo conectar a UPDATE_VERSION_URL");
+        Serial.printf("Error al obtener version.txt: %d\n", code);
+        Serial.println("Posibles causas: DNS, TLS/fallo certificado, o no hay conectividad hacia raw.githubusercontent.com");
     }
+
+    http.end();
 }
