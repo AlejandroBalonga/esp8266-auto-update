@@ -66,7 +66,7 @@ void OTAUpdater::checkForUpdate()
     Serial.print("IP local: ");
     Serial.println(WiFi.localIP());
 
-    // DNS check (opcional, ayuda a diagnosticar)
+    // DNS check
     IPAddress ip;
     Serial.println("Resolviendo raw.githubusercontent.com...");
     if (WiFi.hostByName("raw.githubusercontent.com", ip))
@@ -77,19 +77,19 @@ void OTAUpdater::checkForUpdate()
     else
     {
         Serial.println("Fallo en resolución DNS para raw.githubusercontent.com");
-        // No continue: puede ser problema de DNS/Network
     }
-    
-    BearSSL::WiFiClientSecure client;
-    client.setInsecure(); // solo para pruebas. En producción validar CA/fingerprint.
+
+    // Cliente HTTPS para descargar version.txt
+    BearSSL::WiFiClientSecure client1;
+    client1.setInsecure();
     HTTPClient http;
 
     Serial.print("Conectando a: ");
     Serial.println(UPDATE_VERSION_URL);
 
-    if (!http.begin(client, UPDATE_VERSION_URL))
+    if (!http.begin(client1, UPDATE_VERSION_URL))
     {
-        Serial.println("http.begin() falló (no pudo iniciar conexión HTTPS)");
+        Serial.println("http.begin() falló");
         return;
     }
 
@@ -100,11 +100,22 @@ void OTAUpdater::checkForUpdate()
     {
         String version = http.getString();
         version.trim();
+        http.end(); // Cierra la conexión anterior
+
         Serial.printf("Versión remota: %s\n", version.c_str());
         if (version != CURRENT_VERSION)
         {
-            Serial.println("Nueva versión disponible, procediendo a OTA...");
-            t_httpUpdate_return ret = ESPhttpUpdate.update(client, UPDATE_BIN_URL);
+            Serial.println("Nueva versión disponible, descargando firmware...");
+            Serial.print("URL de descarga: ");
+            Serial.println(UPDATE_BIN_URL);
+
+            // Cliente HTTPS NUEVO para la descarga del binario
+            BearSSL::WiFiClientSecure client2;
+            client2.setInsecure();
+
+            t_httpUpdate_return ret = ESPhttpUpdate.update(client2, UPDATE_BIN_URL);
+            Serial.printf("ESPhttpUpdate.update() retornó: %d\n", ret);
+
             if (ret == HTTP_UPDATE_OK)
             {
                 Serial.println("Actualización OK.");
@@ -126,7 +137,6 @@ void OTAUpdater::checkForUpdate()
     else
     {
         Serial.printf("Error al obtener version.txt: %d\n", code);
-        Serial.println("Posibles causas: DNS, TLS/fallo certificado, o no hay conectividad hacia raw.githubusercontent.com");
     }
 
     http.end();

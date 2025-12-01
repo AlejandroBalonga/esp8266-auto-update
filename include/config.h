@@ -7,6 +7,6 @@
 // URLs: sustituye USER y REPO por los tuyos
 #define UPDATE_VERSION_URL "https://raw.githubusercontent.com/AlejandroBalonga/esp8266-auto-update/main/version.txt"
 #define UPDATE_BIN_URL "https://github.com/AlejandroBalonga/esp8266-auto-update/releases/latest/download/firmware.bin"
-
+// https://github.com/AlejandroBalonga/esp8266-auto-update/releases/download/v8/firmware.bin
 // Versión actual del firmware (actualiza cuando corresponda localmente)
 #define CURRENT_VERSION "1.0.0"
