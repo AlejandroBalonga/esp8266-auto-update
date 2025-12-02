@@ -109,12 +109,14 @@ void OTAUpdater::checkForUpdate()
             Serial.print("URL de descarga: ");
             Serial.println(UPDATE_BIN_URL);
 
-            // Cliente HTTPS NUEVO para la descarga del binario
-            BearSSL::WiFiClientSecure client2;
-            client2.setInsecure();
+            // Crear un nuevo cliente HTTPS específicamente para ESPhttpUpdate
+            BearSSL::WiFiClientSecure *client2 = new BearSSL::WiFiClientSecure();
+            client2->setInsecure();
 
-            t_httpUpdate_return ret = ESPhttpUpdate.update(client2, UPDATE_BIN_URL);
+            t_httpUpdate_return ret = ESPhttpUpdate.update(*client2, UPDATE_BIN_URL);
             Serial.printf("ESPhttpUpdate.update() retornó: %d\n", ret);
+
+            delete client2;
 
             if (ret == HTTP_UPDATE_OK)
             {
@@ -122,7 +124,7 @@ void OTAUpdater::checkForUpdate()
             }
             else if (ret == HTTP_UPDATE_FAILED)
             {
-                Serial.printf("Update failed: %s\n", ESPhttpUpdate.getLastErrorString().c_str());
+                Serial.printf("Update failed: %d - %s\n", ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str());
             }
             else if (ret == HTTP_UPDATE_NO_UPDATES)
             {
