@@ -110,13 +110,14 @@ void OTAUpdater::checkForUpdate()
             Serial.println(UPDATE_BIN_URL);
 
             // Crear un nuevo cliente HTTPS específicamente para ESPhttpUpdate
-            BearSSL::WiFiClientSecure *client2 = new BearSSL::WiFiClientSecure();
+            // Usar WiFiClientSecure con setInsecure() para evitar problemas de certificado
+            std::unique_ptr<BearSSL::WiFiClientSecure> client2(new BearSSL::WiFiClientSecure());
             client2->setInsecure();
+            client2->setBufferSizes(512, 512);
 
+            Serial.println("Iniciando descarga de firmware...");
             t_httpUpdate_return ret = ESPhttpUpdate.update(*client2, UPDATE_BIN_URL);
             Serial.printf("ESPhttpUpdate.update() retornó: %d\n", ret);
-
-            delete client2;
 
             if (ret == HTTP_UPDATE_OK)
             {
