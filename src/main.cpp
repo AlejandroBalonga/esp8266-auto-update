@@ -5,7 +5,6 @@
 
 OTAUpdater updater;
 unsigned long lastCheck = 0;
-const unsigned long CHECK_INTERVAL = 1000UL * 60 * 10; // 10 minutos
 
 void setup()
 {
@@ -32,14 +31,14 @@ void setup()
         Serial.println("\nNo se pudo conectar a WiFi.");
     }
     updater.begin();
-    lastCheck = millis() - CHECK_INTERVAL; // comprobar inmediatamente
+    lastCheck = millis() - OTA_CHECK_INTERVAL_MS; // comprobar inmediatamente
 }
 
 void loop()
 {
     if (WiFi.status() == WL_CONNECTED)
     {
-        if (millis() - lastCheck >= CHECK_INTERVAL)
+        if (millis() - lastCheck >= OTA_CHECK_INTERVAL_MS)
         {
             lastCheck = millis();
             updater.checkForUpdate();

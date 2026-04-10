@@ -1,210 +1,293 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
-#include <ArduinoOTA.h>
-#include "ota.h"
-#include <ESP_OTA_GitHub.h>
+#include <ESP8266HTTPClient.h>
 #include <WiFiClientSecureBearSSL.h>
+#include <CertStoreBearSSL.h>
+#include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <Updater.h>
+#include <memory>
+#include "ota.h"
 #include "config.h"
 
+static const size_t CHUNK_BUFFER_SIZE = 4096;
+static uint8_t chunkBuffer[CHUNK_BUFFER_SIZE];
+
 BearSSL::CertStore certStore;
-String currentTag = "1.0.1"; // Update this to match version.txt
-ESPOTAGitHub espotagitHub(&certStore, GHOTA_USER, GHOTA_REPO, currentTag.c_str(), GHOTA_BIN_FILE, GHOTA_ACCEPT_PRERELEASE);
+bool secureMode = false;
 
-// Variables globales para descarga por chunks
-static const size_t CHUNK_SIZE = 4096; // 4KB chunks
-static uint8_t chunkBuffer[CHUNK_SIZE];
-void setupOTA()
+static bool initCertificateStore()
 {
-    ArduinoOTA.onStart([]()
-                       {
-        String type;
-        if (ArduinoOTA.getCommand() == U_FLASH) {
-            type = "sketch";
-        } else { // U_SPIFFS
-            type = "filesystem";
-        }
-        // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
-        Serial.println("Start updating " + type); });
-    ArduinoOTA.onEnd([]()
-                     { Serial.println("\nEnd"); });
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
-                          { Serial.printf("Progress: %u%%\r", (progress / (total / 100))); });
-    ArduinoOTA.onError([](ota_error_t error)
-                       {
-        Serial.printf("Error[%u]: ", error);
-        if (error == OTA_AUTH_ERROR) {
-            Serial.println("Auth Failed");
-        } else if (error == OTA_BEGIN_ERROR) {
-            Serial.println("Begin Failed");
-        } else if (error == OTA_CONNECT_ERROR) {
-            Serial.println("Connect Failed");
-        } else if (error == OTA_RECEIVE_ERROR) {
-            Serial.println("Receive Failed");
-        } else if (error == OTA_END_ERROR) {
-            Serial.println("End Failed");
-        } });
+    if (!LittleFS.begin())
+    {
+        Serial.println("LittleFS no pudo inicializarse.");
+        return false;
+    }
 
-    ArduinoOTA.begin();
+    int numCerts = certStore.initCertStore(LittleFS, PSTR("/certs.idx"), PSTR("/certs.ar"));
+    Serial.printf("Number of CA certs read: %d\n", numCerts);
+
+    if (numCerts > 0)
+    {
+        Serial.println("Certificados cargados correctamente.");
+        secureMode = true;
+        return true;
+    }
+
+    Serial.println("No se encontraron certificados o el archivo no es válido.");
+    secureMode = false;
+    return false;
 }
 
-void handleOTA()
+static std::unique_ptr<BearSSL::WiFiClientSecure> createSecureClient()
 {
-    ArduinoOTA.handle();
+    auto client = std::make_unique<BearSSL::WiFiClientSecure>();
+    if (secureMode)
+    {
+        client->setCertStore(&certStore);
+    }
+    else
+    {
+        client->setInsecure();
+    }
+    return client;
+}
+
+static bool followRedirects(HTTPClient &http, BearSSL::WiFiClientSecure &client, const String &url, int &httpCode)
+{
+    String currentUrl = url;
+    for (int redirect = 0; redirect < 4; redirect++)
+    {
+        if (!http.begin(client, currentUrl))
+        {
+            return false;
+        }
+        http.addHeader("User-Agent", OTA_USER_AGENT);
+        httpCode = http.GET();
+        if (httpCode == HTTP_CODE_MOVED_PERMANENTLY || httpCode == HTTP_CODE_FOUND || httpCode == HTTP_CODE_SEE_OTHER || httpCode == HTTP_CODE_TEMPORARY_REDIRECT || httpCode == HTTP_CODE_PERMANENT_REDIRECT)
+        {
+            currentUrl = http.header("Location");
+            http.end();
+            if (currentUrl.length() == 0)
+            {
+                return false;
+            }
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool getLatestReleaseInfo(String &tagName, String &downloadUrl)
+{
+    String apiUrl = String("https://api.github.com/repos/") + GHOTA_USER + "/" + GHOTA_REPO + "/releases/latest";
+    auto client = createSecureClient();
+    HTTPClient http;
+    int httpCode = 0;
+
+    if (!followRedirects(http, *client, apiUrl, httpCode))
+    {
+        Serial.println("Error al inicializar la petición al API de GitHub.");
+        return false;
+    }
+
+    if (httpCode != HTTP_CODE_OK)
+    {
+        Serial.printf("GitHub API HTTP error: %d\n", httpCode);
+        http.end();
+        return false;
+    }
+
+    String payload = http.getString();
+    http.end();
+
+    StaticJsonDocument<16384> doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (error)
+    {
+        Serial.print("Error parsing JSON: ");
+        Serial.println(error.c_str());
+        return false;
+    }
+
+    tagName = doc["tag_name"].as<String>();
+    if (tagName.length() == 0)
+    {
+        Serial.println("No se encontró tag_name en la respuesta de GitHub.");
+        return false;
+    }
+
+    if (doc["draft"].as<bool>())
+    {
+        Serial.println("La última release es un draft. No se actualizará.");
+        return false;
+    }
+
+    if (doc["prerelease"].as<bool>() && !GHOTA_ACCEPT_PRERELEASE)
+    {
+        Serial.println("La última release es prerelease y no está aceptada.");
+        return false;
+    }
+
+    JsonArray assets = doc["assets"].as<JsonArray>();
+    for (JsonObject asset : assets)
+    {
+        String assetName = asset["name"].as<String>();
+        if (assetName == GHOTA_BIN_FILE)
+        {
+            downloadUrl = asset["browser_download_url"].as<String>();
+            break;
+        }
+    }
+
+    if (downloadUrl.length() == 0)
+    {
+        Serial.println("No se encontró el asset de firmware en la release.");
+        return false;
+    }
+
+    return true;
+}
+
+static bool downloadFirmware(const String &downloadUrl)
+{
+    auto client = createSecureClient();
+    HTTPClient http;
+    int httpCode = 0;
+
+    if (!followRedirects(http, *client, downloadUrl, httpCode))
+    {
+        Serial.println("Error al inicializar la descarga de firmware.");
+        return false;
+    }
+
+    if (httpCode != HTTP_CODE_OK)
+    {
+        Serial.printf("Firmware download HTTP error: %d\n", httpCode);
+        http.end();
+        return false;
+    }
+
+    int contentLength = http.getSize();
+    if (contentLength <= 0)
+    {
+        Serial.println("Tamaño de firmware inválido.");
+        http.end();
+        return false;
+    }
+
+    Serial.printf("Tamaño del firmware: %d bytes\n", contentLength);
+    if (!Update.begin((uint32_t)contentLength, U_FLASH))
+    {
+        Serial.println("No hay espacio suficiente para la actualización.");
+        http.end();
+        return false;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+    int written = 0;
+    int lastProgress = 0;
+
+    while (http.connected() && written < contentLength)
+    {
+        size_t available = stream->available();
+        if (available)
+        {
+            size_t toRead = available;
+            if (toRead > CHUNK_BUFFER_SIZE)
+            {
+                toRead = CHUNK_BUFFER_SIZE;
+            }
+            int bytesRead = stream->readBytes(chunkBuffer, toRead);
+            if (bytesRead > 0)
+            {
+                size_t bytesWritten = Update.write(chunkBuffer, bytesRead);
+                if (bytesWritten != (size_t)bytesRead)
+                {
+                    Serial.println("Error escribiendo el chunk de firmware.");
+                    http.end();
+                    Update.end();
+                    return false;
+                }
+
+                written += bytesWritten;
+                int progress = (written * 100) / contentLength;
+                if (progress - lastProgress >= 10)
+                {
+                    Serial.printf("Progreso: %d%% (%d/%d)\n", progress, written, contentLength);
+                    lastProgress = progress;
+                }
+                yield();
+            }
+        }
+        else
+        {
+            delay(1);
+        }
+    }
+
+    http.end();
+
+    if (Update.end(true))
+    {
+        Serial.printf("Actualización completa: %d bytes escritos\n", written);
+        return true;
+    }
+
+    Serial.printf("Update failed: %s\n", Update.getErrorString().c_str());
+    return false;
 }
 
 OTAUpdater::OTAUpdater() {}
 
 void OTAUpdater::begin()
 {
-    // Initialize LittleFS and certificate store for secure HTTPS connections
-    LittleFS.begin();
-    int numCerts = certStore.initCertStore(LittleFS, PSTR("/certs.idx"), PSTR("/certs.ar"));
-    Serial.printf("Number of CA certs read: %d\n", numCerts);
-    if (numCerts == 0)
+    if (!initCertificateStore())
     {
-        Serial.println("No certs found. Did you upload certs.ar and certs.idx to LittleFS?");
-        espotagitHub.setInsecure(true);
-    }
-    else
-    {
-        espotagitHub.setInsecure(false);
-    }
-}
-
-// Descarga por chunks directamente a la flash
-bool downloadAndUpdateFirmware(const char *url)
-{
-    Serial.println("Iniciando descarga por chunks...");
-
-    std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure());
-    client->setInsecure();
-
-    HTTPClient http;
-    http.begin(*client, url);
-    http.addHeader("User-Agent", "ESP8266-Auto-Update");
-
-    int httpCode = http.GET();
-    Serial.printf("HTTP Code: %d\n", httpCode);
-
-    if (httpCode != HTTP_CODE_OK)
-    {
-        Serial.printf("Error HTTP: %d\n", httpCode);
-        http.end();
-        return false;
-    }
-
-    size_t contentLength = http.getSize();
-    Serial.printf("Tamaño del firmware: %d bytes\n", contentLength);
-
-    // Iniciar actualización OTA
-    if (!Update.begin(contentLength))
-    {
-        Serial.println("No hay espacio suficiente para actualización");
-        http.end();
-        return false;
-    }
-
-    WiFiClient *stream = http.getStreamPtr();
-    size_t written = 0;
-    size_t lastProgress = 0;
-
-    // Descargar y escribir por chunks
-    while (http.connected() && written < contentLength)
-    {
-        size_t available = stream->available();
-        if (available)
-        {
-            size_t bytesToRead = (available > CHUNK_SIZE) ? CHUNK_SIZE : available;
-            int bytesRead = stream->readBytes(chunkBuffer, bytesToRead);
-
-            if (bytesRead > 0)
-            {
-                // Escribir chunk a la flash
-                size_t written_chunk = Update.write(chunkBuffer, bytesRead);
-                written += written_chunk;
-
-                // Mostrar progreso cada 10%
-                size_t currentProgress = (written * 100) / contentLength;
-                if (currentProgress - lastProgress >= 10)
-                {
-                    Serial.printf("Progreso: %d%% (%d/%d bytes)\n", currentProgress, written, contentLength);
-                    lastProgress = currentProgress;
-                }
-
-                // Dar tiempo al ESP para otros procesos
-                yield();
-            }
-        }
-        else
-        {
-            delay(1); // Esperar datos disponibles
-        }
-
-        // Timeout de seguridad
-        if (!http.connected() && written < contentLength)
-        {
-            Serial.println("Conexión perdida durante descarga");
-            http.end();
-            // Update.abort() does not exist on the ESP8266 Update class; end the update to clean up
-            Update.end();
-            return false;
-        }
-    }
-
-    http.end();
-
-    // Finalizar actualización
-    if (Update.end())
-    {
-        Serial.printf("Actualización completada: %d bytes escritos\n", written);
-        return true;
-    }
-    else
-    {
-        Serial.printf("Error al finalizar Update: %s\n", Update.getErrorString().c_str());
-        return false;
+        Serial.println("Usando modo inseguro para conexiones HTTPS.");
     }
 }
 
 void OTAUpdater::checkForUpdate()
 {
-    Serial.println("Checking for OTA update from GitHub...");
+    Serial.println("Comprobando actualización OTA en GitHub...");
 
     if (WiFi.status() != WL_CONNECTED)
     {
-        Serial.println("WiFi not connected, aborting check.");
+        Serial.println("WiFi no conectado, abortando.");
         return;
     }
 
-    Serial.print("Local IP: ");
+    Serial.print("IP local: ");
     Serial.println(WiFi.localIP());
 
-    // Si se quiere validar certificado, inicializar tiempo en la librería embebida
-    // no hace falta objeto externo client para checkUpgrade/doUpgrade.
-
-    WiFiClientSecure test;
-    test.setInsecure();
-    if (test.connect("api.github.com", 443))
-        Serial.println("GITHUB OK");
-    else
-        Serial.println("GITHUB FAIL");
-
-    if (espotagitHub.checkUpgrade())
+    String latestTag;
+    String downloadUrl;
+    if (!getLatestReleaseInfo(latestTag, downloadUrl))
     {
-        Serial.println("Upgrade available, starting update...");
-        if (espotagitHub.doUpgrade())
-        {
-            Serial.println("Upgrade successful!");
-        }
-        else
-        {
-            Serial.printf("Upgrade failed: %s\n", espotagitHub.getLastError().c_str());
-        }
+        Serial.println("No se pudo obtener información de la última release.");
+        return;
+    }
+
+    Serial.printf("Versión actual: %s\n", FIRMWARE_VERSION);
+    Serial.printf("Última versión: %s\n", latestTag.c_str());
+
+    if (latestTag == FIRMWARE_VERSION)
+    {
+        Serial.println("No hay actualización disponible.");
+        return;
+    }
+
+    Serial.println("Nueva versión encontrada, descargando firmware...");
+    if (downloadFirmware(downloadUrl))
+    {
+        Serial.println("Firmware descargado correctamente. Reiniciando...");
+        delay(100);
+        ESP.restart();
     }
     else
     {
-        Serial.println("No upgrade available or check failed.");
-        Serial.printf("Last error: %s\n", espotagitHub.getLastError().c_str());
+        Serial.println("Fallo al descargar o aplicar la actualización.");
     }
 }
