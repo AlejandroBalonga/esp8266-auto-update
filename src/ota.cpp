@@ -63,8 +63,12 @@ void OTAUpdater::begin()
     Serial.printf("Number of CA certs read: %d\n", numCerts);
     if (numCerts == 0)
     {
-        Serial.println("No certs found. Did you upload certs.ar to LittleFS?");
-        // Continue anyway, but HTTPS may fail
+        Serial.println("No certs found. Did you upload certs.ar and certs.idx to LittleFS?");
+        espotagitHub.setInsecure(true);
+    }
+    else
+    {
+        espotagitHub.setInsecure(false);
     }
 }
 
