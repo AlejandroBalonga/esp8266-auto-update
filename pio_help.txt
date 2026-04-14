@@ -1,0 +1,17 @@
+Usage: pio run [OPTIONS]
+
+Options:
+  -e, --environment TEXT
+  -t, --target TEXT
+  --upload-port TEXT
+  --monitor-port TEXT
+  -d, --project-dir PATH
+  -c, --project-conf FILE
+  -j, --jobs INTEGER       Allow N jobs at once. Default is a number of CPUs
+                           in a system (N=4)
+  -a, --program-arg TEXT   A program argument (multiple are allowed)
+  --disable-auto-clean
+  --list-targets
+  -s, --silent
+  -v, --verbose
+  -h, --help               Show this message and exit.
