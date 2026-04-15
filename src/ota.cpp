@@ -23,7 +23,7 @@ static uint8_t chunkBuffer[CHUNK_BUFFER_SIZE];
 static std::unique_ptr<BearSSL::WiFiClientSecure> createSecureClient()
 {
     auto client = std::make_unique<BearSSL::WiFiClientSecure>();
-    client->setInsecure();        // sin verificación de CA
+    client->setInsecure();              // sin verificación de CA
     client->setBufferSizes(1024, 1024); // reducir buffers para ahorrar heap
     return client;
 }
@@ -67,7 +67,7 @@ static bool syncTime()
 // FIX: llama a http.end() antes de cada http.begin() para evitar cliente sucio
 // ---------------------------------------------------------------------------
 static bool followRedirects(HTTPClient &http, BearSSL::WiFiClientSecure &client,
-                             const String &startUrl, int &httpCode)
+                            const String &startUrl, int &httpCode)
 {
     String currentUrl = startUrl;
     for (int redirect = 0; redirect < 5; redirect++)
@@ -86,14 +86,18 @@ static bool followRedirects(HTTPClient &http, BearSSL::WiFiClientSecure &client,
         http.addHeader("User-Agent", OTA_USER_AGENT);
         // Pedirle a GitHub la respuesta en JSON (necesario para la API)
         http.addHeader("Accept", "application/vnd.github+json");
+        // FIX: registrar explícitamente el header Location antes del GET
+        // sin esto http.header("Location") devuelve vacío en los redirects
+        const char *headerKeys[] = {"Location"};
+        http.collectHeaders(headerKeys, 1);
         yield();
 
         httpCode = http.GET();
         Serial.printf("HTTP GET: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
 
         if (httpCode == HTTP_CODE_MOVED_PERMANENTLY ||
-            httpCode == HTTP_CODE_FOUND            ||
-            httpCode == HTTP_CODE_SEE_OTHER        ||
+            httpCode == HTTP_CODE_FOUND ||
+            httpCode == HTTP_CODE_SEE_OTHER ||
             httpCode == HTTP_CODE_TEMPORARY_REDIRECT ||
             httpCode == HTTP_CODE_PERMANENT_REDIRECT)
         {
@@ -127,8 +131,7 @@ static bool getLatestReleaseInfo(String &tagName, String &downloadUrl)
     Serial.printf("Free heap: %u bytes\n", ESP.getFreeHeap());
 
     // FIX: HTTPS — la API de GitHub redirige/rechaza HTTP
-    String apiUrl = String("https://api.github.com/repos/")
-                    + GHOTA_USER + "/" + GHOTA_REPO + "/releases/latest";
+    String apiUrl = String("https://api.github.com/repos/") + GHOTA_USER + "/" + GHOTA_REPO + "/releases/latest";
     Serial.printf("API URL: %s\n", apiUrl.c_str());
 
     auto client = createSecureClient();
@@ -156,17 +159,17 @@ static bool getLatestReleaseInfo(String &tagName, String &downloadUrl)
     // FIX: Filtro → solo traemos los campos que nos interesan
     // Esto evita que ArduinoJson intente procesar 30-50 KB de JSON
     StaticJsonDocument<128> filter;
-    filter["tag_name"]                          = true;
-    filter["draft"]                             = true;
-    filter["prerelease"]                        = true;
-    filter["assets"][0]["name"]                 = true;
+    filter["tag_name"] = true;
+    filter["draft"] = true;
+    filter["prerelease"] = true;
+    filter["assets"][0]["name"] = true;
     filter["assets"][0]["browser_download_url"] = true;
 
     // FIX: DynamicJsonDocument (heap, no stack) y parseo directo desde stream
     DynamicJsonDocument doc(3072);
     WiFiClient *stream = http.getStreamPtr();
     DeserializationError error = deserializeJson(doc, *stream,
-                                  DeserializationOption::Filter(filter));
+                                                 DeserializationOption::Filter(filter));
     http.end();
     yield();
 
@@ -264,7 +267,7 @@ static bool downloadFirmware(const String &downloadUrl)
     }
 
     WiFiClient *stream = http.getStreamPtr();
-    int written     = 0;
+    int written = 0;
     int lastProgress = -10;
     unsigned long lastData = millis();
 

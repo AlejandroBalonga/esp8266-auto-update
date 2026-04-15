@@ -1,4 +1,5 @@
 1.0.1
+(acordate de actualizar FIRMWARE_VERSION en config.h también)
 # 1. Actualizás FIRMWARE_VERSION en config.h a "1.0.2"
 # 2. Commit y push normal
 git add .
@@ -6,5 +7,19 @@ git commit -m "bump version 1.0.2"
 git push
 
 # 3. Creás el tag con el mismo número (sin v)
+git tag 1.0.2
+git push origin 1.0.2
+
+-----------------------------------------
+
+git add .github/workflows/ci.yml
+git commit -m "fix: permisos para crear release"
+git push
+
+# Borrar el tag viejo (local y remoto)
+git tag -d 1.0.2
+git push origin --delete 1.0.2
+
+# Volver a crearlo para disparar el workflow
 git tag 1.0.2
 git push origin 1.0.2
