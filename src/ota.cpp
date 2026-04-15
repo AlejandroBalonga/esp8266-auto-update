@@ -84,7 +84,6 @@ static bool followRedirects(HTTPClient &http, BearSSL::WiFiClientSecure &client,
 
         http.setTimeout(15000);
         http.addHeader("User-Agent", OTA_USER_AGENT);
-        // Pedirle a GitHub la respuesta en JSON (necesario para la API)
         http.addHeader("Accept", "application/vnd.github+json");
         // FIX: registrar explícitamente el header Location antes del GET
         // sin esto http.header("Location") devuelve vacío en los redirects
