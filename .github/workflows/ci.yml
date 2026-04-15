@@ -3,6 +3,8 @@ name: Build and Release
 on:
   push:
     branches: [main]
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+" # dispara solo con tags como 1.0.1
 
 jobs:
   build:
@@ -24,16 +26,19 @@ jobs:
       - name: Build firmware
         run: pio run
 
-      - name: Get version
+      # Lee la versión desde version.txt solo cuando viene de un tag
+      - name: Get version from tag
+        if: startsWith(github.ref, 'refs/tags/')
         id: version
-        run: echo "version=$(cat version.txt)" >> $GITHUB_OUTPUT
+        run: echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
 
+      # Crea la release SOLO cuando el push es un tag (no en cada commit a main)
       - name: Create Release
-        id: create_release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: Release v${{ steps.version.outputs.version }}
+          tag_name: ${{ steps.version.outputs.version }} # ej: 1.0.2  (sin v)
+          name: Release ${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
           files: .pio/build/d1_mini/firmware.bin
