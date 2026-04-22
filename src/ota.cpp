@@ -1,12 +1,14 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
-#include <ESP8266httpUpdate.h>
-#include <WiFiClientSecureBearSSL.h>
+#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
+#include <Updater.h>
 #include <time.h>
 #include "ota.h"
 #include "config.h"
+
+static uint8_t downloadBuffer[1024];
 
 // ---------------------------------------------------------------------------
 // Sincronización NTP
@@ -42,17 +44,6 @@ static void syncTime()
 }
 
 // ---------------------------------------------------------------------------
-// Cliente HTTPS sin verificacion de CA
-// ---------------------------------------------------------------------------
-static BearSSL::WiFiClientSecure *createSecureClient()
-{
-    auto *client = new BearSSL::WiFiClientSecure();
-    client->setInsecure();
-    client->setBufferSizes(1024, 1024);
-    return client;
-}
-
-// ---------------------------------------------------------------------------
 // Consulta la GitHub API y devuelve tag y URL de descarga del firmware
 // ---------------------------------------------------------------------------
 static bool getLatestReleaseInfo(String &tagName, String &downloadUrl)
@@ -62,11 +53,14 @@ static bool getLatestReleaseInfo(String &tagName, String &downloadUrl)
 
     String apiUrl = String("https://api.github.com/repos/") + GHOTA_USER + "/" + GHOTA_REPO + "/releases/latest";
 
-    BearSSL::WiFiClientSecure *client = createSecureClient();
-    HTTPClient http;
+    WiFiClientSecure apiClient;
+    apiClient.setInsecure();
+    apiClient.setBufferSizes(1024, 1024);
 
-    http.begin(*client, apiUrl);
+    HTTPClient http;
+    http.begin(apiClient, apiUrl);
     http.setTimeout(15000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.addHeader("User-Agent", OTA_USER_AGENT);
     http.addHeader("Accept", "application/vnd.github+json");
 
@@ -78,11 +72,9 @@ static bool getLatestReleaseInfo(String &tagName, String &downloadUrl)
         Serial.printf("GitHub API error: %d (%s)\n", httpCode,
                       http.errorToString(httpCode).c_str());
         http.end();
-        delete client;
         return false;
     }
 
-    // Filtro: solo los campos que necesitamos -> ahorra heap
     StaticJsonDocument<128> filter;
     filter["tag_name"] = true;
     filter["draft"] = true;
@@ -95,7 +87,6 @@ static bool getLatestReleaseInfo(String &tagName, String &downloadUrl)
     DeserializationError error = deserializeJson(doc, *stream,
                                                  DeserializationOption::Filter(filter));
     http.end();
-    delete client;
     yield();
 
     if (error)
@@ -142,56 +133,218 @@ static bool getLatestReleaseInfo(String &tagName, String &downloadUrl)
 }
 
 // ---------------------------------------------------------------------------
-// Descarga y flashea el firmware usando ESPhttpUpdate.
-// Esta libreria maneja internamente: redirects, stream y escritura en flash.
+// Paso 1: obtener la URL firmada de release-assets.githubusercontent.com
+// Hace un GET a github.com, lee el Location del 302, y cierra todo.
+// Usamos GET (no HEAD) porque github.com a veces no responde Location en HEAD.
+// ---------------------------------------------------------------------------
+static String resolveGithubAssetUrl(const String &githubUrl)
+{
+    Serial.println("Resolviendo URL del asset...");
+
+    WiFiClientSecure resolveClient;
+    resolveClient.setInsecure();
+    resolveClient.setBufferSizes(512, 512);
+    resolveClient.setTimeout(10);
+
+    HTTPClient http;
+    http.begin(resolveClient, githubUrl);
+    http.setTimeout(10000);
+    http.addHeader("User-Agent", OTA_USER_AGENT);
+
+    // Registrar Location antes del GET
+    const char *keys[] = {"Location"};
+    http.collectHeaders(keys, 1);
+
+    // GET sin seguir redirects: queremos capturar el 302 y su Location
+    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    int code = http.GET();
+    Serial.printf("resolveGithubAssetUrl HTTP: %d\n", code);
+
+    String location = "";
+    if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308)
+    {
+        location = http.header("Location");
+        Serial.printf("Location: %s\n", location.c_str());
+    }
+    else if (code == HTTP_CODE_OK)
+    {
+        // No hubo redirect, la URL original ya es la final
+        location = githubUrl;
+    }
+
+    http.end();
+    // Destruir el cliente completamente antes de la descarga
+    resolveClient.stop();
+    yield();
+    delay(100);
+
+    return location;
+}
+
+// ---------------------------------------------------------------------------
+// Paso 2: descargar el firmware desde la URL firmada con un cliente nuevo
+// ---------------------------------------------------------------------------
+static bool downloadFromUrl(const String &finalUrl)
+{
+    Serial.println("Descargando firmware...");
+    Serial.printf("Free heap: %u bytes\n", ESP.getFreeHeap());
+    Serial.printf("URL: %s\n", finalUrl.substring(0, 60).c_str());
+    Serial.println("...");
+
+    WiFiClientSecure *dlClient = new WiFiClientSecure();
+    dlClient->setInsecure();
+    // Buffer RX maximo de BearSSL: 16KB
+    // El buffer anterior de 4KB se llenaba y el servidor cortaba la conexion
+    dlClient->setBufferSizes(16384, 512);
+    dlClient->setTimeout(30);
+
+    HTTPClient *http = new HTTPClient();
+    http->begin(*dlClient, finalUrl);
+    http->setTimeout(30000);
+    http->setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    http->useHTTP10(true);
+    http->addHeader("User-Agent", OTA_USER_AGENT);
+    http->addHeader("Accept", "application/octet-stream");
+
+    int httpCode = http->GET();
+    Serial.printf("HTTP GET: %d\n", httpCode);
+
+    if (httpCode != HTTP_CODE_OK)
+    {
+        Serial.printf("Error HTTP: %d (%s)\n", httpCode,
+                      http->errorToString(httpCode).c_str());
+        http->end();
+        delete http;
+        delete dlClient;
+        return false;
+    }
+
+    int contentLength = http->getSize();
+    Serial.printf("Tamanio: %d bytes\n", contentLength);
+
+    if (contentLength <= 0)
+    {
+        Serial.println("Content-Length invalido.");
+        http->end();
+        delete http;
+        delete dlClient;
+        return false;
+    }
+
+    if (!Update.begin((size_t)contentLength, U_FLASH))
+    {
+        Serial.printf("Update.begin() fallo: %s\n", Update.getErrorString().c_str());
+        http->end();
+        delete http;
+        delete dlClient;
+        return false;
+    }
+
+    WiFiClient *stream = http->getStreamPtr();
+    if (!stream)
+    {
+        Serial.println("getStreamPtr() devolvio null.");
+        Update.end();
+        http->end();
+        delete http;
+        delete dlClient;
+        return false;
+    }
+
+    int written = 0;
+    int lastProgress = -10;
+    unsigned long lastActivity = millis();
+
+    while (written < contentLength)
+    {
+        int avail = stream->available();
+
+        if (avail > 0)
+        {
+            lastActivity = millis();
+            int remaining = contentLength - written;
+            int toRead = min(min(avail, remaining), (int)sizeof(downloadBuffer));
+            int bytesRead = stream->read(downloadBuffer, toRead);
+
+            if (bytesRead > 0)
+            {
+                int bytesWritten = Update.write(downloadBuffer, bytesRead);
+                if (bytesWritten != bytesRead)
+                {
+                    Serial.printf("Error escribiendo flash: %s\n",
+                                  Update.getErrorString().c_str());
+                    Update.end();
+                    http->end();
+                    delete http;
+                    delete dlClient;
+                    return false;
+                }
+                written += bytesWritten;
+
+                int pct = (written * 100) / contentLength;
+                if (pct - lastProgress >= 10)
+                {
+                    Serial.printf("Progreso: %d%% (%d/%d bytes)\n",
+                                  pct, written, contentLength);
+                    lastProgress = pct;
+                }
+            }
+        }
+        else
+        {
+            if (!dlClient->connected())
+            {
+                Serial.printf("Conexion cerrada prematuramente (%d/%d bytes).\n",
+                              written, contentLength);
+                Update.end();
+                http->end();
+                delete http;
+                delete dlClient;
+                return false;
+            }
+            if (millis() - lastActivity > 20000)
+            {
+                Serial.printf("Timeout sin datos (%d/%d bytes).\n",
+                              written, contentLength);
+                Update.end();
+                http->end();
+                delete http;
+                delete dlClient;
+                return false;
+            }
+            yield();
+        }
+    }
+
+    http->end();
+    delete http;
+    delete dlClient;
+
+    if (!Update.end(true))
+    {
+        Serial.printf("Update.end() fallo: %s\n", Update.getErrorString().c_str());
+        return false;
+    }
+
+    Serial.printf("Firmware escrito: %d bytes.\n", written);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Descarga el firmware en dos pasos bien separados
 // ---------------------------------------------------------------------------
 static bool downloadFirmware(const String &downloadUrl)
 {
-    Serial.println("Iniciando descarga con ESPhttpUpdate...");
-    Serial.printf("URL: %s\n", downloadUrl.c_str());
-    Serial.printf("Free heap: %u bytes\n", ESP.getFreeHeap());
-
-    BearSSL::WiFiClientSecure *client = createSecureClient();
-    client->setBufferSizes(4096, 512);
-
-    ESPhttpUpdate.onStart([]()
-                          { Serial.println("ESPhttpUpdate: inicio de descarga"); });
-    ESPhttpUpdate.onProgress([](int current, int total)
-                             {
-        static int lastPct = -10;
-        int pct = (total > 0) ? (current * 100 / total) : 0;
-        if (pct - lastPct >= 10) {
-            Serial.printf("Progreso: %d%% (%d/%d bytes)\n", pct, current, total);
-            lastPct = pct;
-        } });
-    ESPhttpUpdate.onEnd([]()
-                        { Serial.println("ESPhttpUpdate: descarga completa"); });
-    ESPhttpUpdate.onError([](int err)
-                          { Serial.printf("ESPhttpUpdate error %d: %s\n", err,
-                                          ESPhttpUpdate.getLastErrorString().c_str()); });
-
-    // No reiniciar automaticamente: queremos loguear el resultado primero
-    ESPhttpUpdate.rebootOnUpdate(false);
-
-    t_httpUpdate_return ret = ESPhttpUpdate.update(*client, downloadUrl);
-    delete client;
-
-    switch (ret)
+    // Paso 1: resolver la URL firmada (cliente efímero, se destruye solo)
+    String finalUrl = resolveGithubAssetUrl(downloadUrl);
+    if (finalUrl.isEmpty())
     {
-    case HTTP_UPDATE_OK:
-        Serial.println("Firmware actualizado correctamente.");
-        return true;
-
-    case HTTP_UPDATE_NO_UPDATES:
-        Serial.println("ESPhttpUpdate: sin actualizacion disponible.");
-        return false;
-
-    case HTTP_UPDATE_FAILED:
-    default:
-        Serial.printf("ESPhttpUpdate fallo: %s\n",
-                      ESPhttpUpdate.getLastErrorString().c_str());
+        Serial.println("No se pudo resolver la URL del asset.");
         return false;
     }
+
+    // Paso 2: descargar con cliente completamente nuevo
+    return downloadFromUrl(finalUrl);
 }
 
 // ---------------------------------------------------------------------------
