@@ -48,14 +48,13 @@ static void syncTime()
 // Consulta la GitHub API y devuelve tag y URL de descarga del firmware
 // ---------------------------------------------------------------------------
 static bool getLatestReleaseInfo(const AppConfig &cfg,
-                                  String &tagName, String &downloadUrl)
+                                 String &tagName, String &downloadUrl)
 {
     Serial.println("Consultando GitHub API...");
     Serial.printf("Free heap: %u bytes\n", ESP.getFreeHeap());
 
     // Usar usuario y repo desde AppConfig (configurables en runtime)
-    String apiUrl = String("https://api.github.com/repos/")
-                    + cfg.ghotaUser + "/" + cfg.ghotaRepo + "/releases/latest";
+    String apiUrl = String("https://api.github.com/repos/") + cfg.ghotaUser + "/" + cfg.ghotaRepo + "/releases/latest";
 
     WiFiClientSecure apiClient;
     apiClient.setInsecure();
@@ -80,16 +79,16 @@ static bool getLatestReleaseInfo(const AppConfig &cfg,
     }
 
     StaticJsonDocument<128> filter;
-    filter["tag_name"]                          = true;
-    filter["draft"]                             = true;
-    filter["prerelease"]                        = true;
-    filter["assets"][0]["name"]                 = true;
+    filter["tag_name"] = true;
+    filter["draft"] = true;
+    filter["prerelease"] = true;
+    filter["assets"][0]["name"] = true;
     filter["assets"][0]["browser_download_url"] = true;
 
     DynamicJsonDocument doc(3072);
     WiFiClient *stream = http.getStreamPtr();
     DeserializationError error = deserializeJson(doc, *stream,
-                                  DeserializationOption::Filter(filter));
+                                                 DeserializationOption::Filter(filter));
     http.end();
     yield();
 
@@ -244,7 +243,7 @@ static bool downloadFromUrl(const String &finalUrl)
         return false;
     }
 
-    int written      = 0;
+    int written = 0;
     int lastProgress = -10;
     unsigned long lastActivity = millis();
 
@@ -256,12 +255,14 @@ static bool downloadFromUrl(const String &finalUrl)
         {
             lastActivity = millis();
             int remaining = contentLength - written;
-            int toRead    = min(min(avail, remaining), (int)sizeof(downloadBuffer));
+            int toRead = min(min(avail, remaining), (int)sizeof(downloadBuffer));
             int bytesRead = stream->read(downloadBuffer, toRead);
 
             if (bytesRead > 0)
             {
+                digitalWrite(LED_BUILTIN, LOW); // parpadeo de actividad
                 int bytesWritten = Update.write(downloadBuffer, bytesRead);
+                digitalWrite(LED_BUILTIN, HIGH);
                 if (bytesWritten != bytesRead)
                 {
                     Serial.printf("Error escribiendo flash: %s\n",
